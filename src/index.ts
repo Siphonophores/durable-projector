@@ -277,11 +277,11 @@ function generateUnrealizedGainsBlock(period: PeriodSummary, scaleFactor: number
 	`;
 }
 
-function calculateOptimalScaling(periods: Array<PeriodSummary & { transactions: Transaction[] }>): { scaleFactor: number } {
-	if (periods.length === 0) return { scaleFactor: 1 };
+function calculateOptimalScaling(periods: Array<PeriodSummary & { transactions: Transaction[] }>): { scaleFactor: number; separatorPosition: number } {
+	if (periods.length === 0) return { scaleFactor: 1, separatorPosition: 50 };
 	
-	// Calculate maximum content height for each period based on individual transactions
-	const maxContentHeights = periods.map(period => {
+	// Calculate content heights for each period based on individual transactions
+	const periodHeights = periods.map(period => {
 		const revenueTransactions = period.transactions.filter(t => t.type === 'revenue');
 		const expenseTransactions = period.transactions.filter(t => t.type === 'expense');
 		
@@ -289,26 +289,73 @@ function calculateOptimalScaling(periods: Array<PeriodSummary & { transactions: 
 			sum + Math.max(40, t.amount * 0.05) + 4, 0); // +4 for margin
 		const expenseHeight = expenseTransactions.reduce((sum, t) => 
 			sum + Math.max(40, t.amount * 0.05) + 4, 0); // +4 for margin
-		const unrealizedHeight = Math.max(30, period.unrealized_gains * 0.05);
+		const unrealizedHeight = period.unrealized_gains > 0 ? Math.max(30, period.unrealized_gains * 0.05) + 4 : 0;
 		
-		// Revenue section is max of individual revenue blocks or unrealized gains
-		const revenueSection = Math.max(revenueHeight, unrealizedHeight);
+		// Revenue section is sum of individual revenue blocks plus unrealized gains
+		const revenueSection = revenueHeight + unrealizedHeight;
 		const totalHeight = revenueSection + expenseHeight;
 		
-		return totalHeight;
+		return {
+			revenueHeight: revenueSection,
+			expenseHeight: expenseHeight,
+			totalHeight: totalHeight
+		};
 	});
 	
-	const maxContent = Math.max(...maxContentHeights);
+	// Find the maximum heights across all periods
+	const maxRevenueHeight = Math.max(...periodHeights.map(p => p.revenueHeight));
+	const maxExpenseHeight = Math.max(...periodHeights.map(p => p.expenseHeight));
+	const maxTotalHeight = maxRevenueHeight + maxExpenseHeight;
+	
+	// Debug logging to understand the calculations
+	console.log('Period heights:', periodHeights);
+	console.log('Max revenue height:', maxRevenueHeight, 'Max expense height:', maxExpenseHeight);
 	
 	// Use 80% of container height as usable space (leaving room for padding)
 	// Base heights: 400px desktop, 300px tablet, 240px mobile
 	const usableHeight = 320; // 80% of 400px desktop - we'll scale down for smaller screens via CSS
 	
-	if (maxContent > usableHeight) {
-		return { scaleFactor: usableHeight / maxContent };
+	let scaleFactor = 1;
+	if (maxTotalHeight > usableHeight) {
+		scaleFactor = usableHeight / maxTotalHeight;
 	}
 	
-	return { scaleFactor: 1 };
+	// Calculate optimal separator position based on content distribution
+	const scaledRevenueHeight = maxRevenueHeight * scaleFactor;
+	const scaledExpenseHeight = maxExpenseHeight * scaleFactor;
+	const scaledTotalHeight = scaledRevenueHeight + scaledExpenseHeight;
+	
+	// Calculate separator position as percentage from top
+	// Revenue section grows upward from separator, so separator position should favor the larger section
+	let separatorPosition = 50; // default fallback
+	
+	if (scaledTotalHeight > 0) {
+		// Base calculation: allocate space proportionally to content
+		const basePosition = (scaledExpenseHeight / scaledTotalHeight) * 100;
+		
+		// Calculate the ratio between sections to determine how much to adjust
+		const revenueRatio = scaledRevenueHeight / scaledTotalHeight;
+		const expenseRatio = scaledExpenseHeight / scaledTotalHeight;
+		
+		// If one section is significantly larger, give it more space
+		if (revenueRatio > 0.7) {
+			// Revenue dominates - move separator down significantly
+			separatorPosition = Math.min(75, basePosition + 15);
+		} else if (expenseRatio > 0.7) {
+			// Expenses dominate - move separator up significantly  
+			separatorPosition = Math.max(25, basePosition - 15);
+		} else {
+			// More balanced - use proportional allocation with slight bias towards larger section
+			const adjustment = (revenueRatio - expenseRatio) * 10; // Max 10% adjustment
+			separatorPosition = basePosition - adjustment;
+		}
+		
+		// Ensure separator stays within reasonable bounds (25% to 75%)
+		separatorPosition = Math.max(25, Math.min(75, separatorPosition));
+	}
+	
+	console.log('Final separator position:', separatorPosition + '%');
+	return { scaleFactor, separatorPosition };
 }
 
 function generatePeriodColumns(periods: Array<PeriodSummary & { transactions: Transaction[] }>): string {
@@ -317,14 +364,14 @@ function generatePeriodColumns(periods: Array<PeriodSummary & { transactions: Tr
 			<div class="flex-shrink-0 bg-white rounded-lg shadow p-4 w-64 period-column">
 				<h3 class="text-lg font-semibold mb-4 text-center">Period 1</h3>
 				<div class="period-container">
-					<div class="separator-line"></div>
+					<div class="separator-line" style="top: 50%;"></div>
 					<div class="text-center text-gray-500 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">No transactions yet</div>
 				</div>
 			</div>
 		`;
 	}
 
-	const { scaleFactor } = calculateOptimalScaling(periods);
+	const { scaleFactor, separatorPosition } = calculateOptimalScaling(periods);
 
 	return periods.map(period => `
 		<div class="flex-shrink-0 bg-white rounded-lg shadow p-4 w-64 period-column">
@@ -338,13 +385,13 @@ function generatePeriodColumns(periods: Array<PeriodSummary & { transactions: Tr
 				<div class="text-lg border-t pt-1 mt-1">${period.ending_balance > 0 ? '+' : ''}${period.ending_balance.toLocaleString()}</div>
 			</div>
 
-			<!-- Visual blocks container with fixed separator -->
+			<!-- Visual blocks container with smart separator -->
 			<div class="period-container">
-				<!-- Fixed separator line -->
-				<div class="separator-line"></div>
+				<!-- Smart separator line positioned based on content -->
+				<div class="separator-line" style="top: ${separatorPosition}%;"></div>
 				
 				<!-- Revenue section (grows upward from line) -->
-				<div class="revenue-section">
+				<div class="revenue-section" style="bottom: ${100 - separatorPosition}%;">
 					<!-- Individual revenue transactions closest to middle line -->
 					${period.transactions
 						.filter(t => t.type === 'revenue')
@@ -356,7 +403,7 @@ function generatePeriodColumns(periods: Array<PeriodSummary & { transactions: Tr
 				</div>
 
 				<!-- Expense section (grows downward from line) -->
-				<div class="expense-section">
+				<div class="expense-section" style="top: ${separatorPosition}%;">
 					${period.transactions
 						.filter(t => t.type === 'expense')
 						.map(transaction => generateTransactionBlock(transaction, scaleFactor))
@@ -564,7 +611,6 @@ export default {
 					
 					.separator-line {
 						position: absolute;
-						top: 50%;
 						left: 0;
 						right: 0;
 						height: 2px;
@@ -574,7 +620,6 @@ export default {
 					
 					.revenue-section {
 						position: absolute;
-						bottom: 50%;
 						left: 0;
 						right: 0;
 						display: flex;
@@ -584,7 +629,6 @@ export default {
 					
 					.expense-section {
 						position: absolute;
-						top: 50%;
 						left: 0;
 						right: 0;
 						display: flex;

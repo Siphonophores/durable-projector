@@ -75,7 +75,13 @@ The app uses **1000 MXN blocks** as the standard unit for visual representation:
 ### Durable Objects Backend
 - **Class**: `FinancialProjector` extends `DurableObject<Env>`
 - **Storage**: SQLite database with transactions table
-- **Methods**: `addTransaction()`, `getPeriodSummary()`, `getAllPeriods()`
+- **Core Methods**: 
+  - `addTransaction()` - Insert new financial transaction
+  - `getPeriodSummary()` - Calculate period totals and inventory
+  - `getAllPeriods()` - Get aggregated period summaries
+  - `getTransactionsByPeriod()` - Fetch individual transactions for block rendering
+  - `getAllPeriodsWithTransactions()` - Combined data for detailed UI rendering
+  - `addSampleData()` - Populate database with realistic test scenarios
 
 ### Database Schema
 ```sql
@@ -93,23 +99,45 @@ CREATE TABLE transactions (
 ### API Endpoints
 - `POST /api/transaction` - Add new transaction
 - `GET /api/periods` - Get all period summaries
+- `GET /api/periods-with-transactions` - Get periods with detailed transaction data
 - `GET /api/period/[number]` - Get specific period summary
+- `POST /api/sample-data` - Load sample transactions for testing
 - `GET /tshirt-icon.svg` - T-shirt icon asset
 
-### Frontend
-- **Framework**: Vanilla HTML/CSS/JavaScript with Tailwind CSS
+### Frontend Architecture
+- **Framework**: Vanilla HTML/CSS/JavaScript with Tailwind CSS + Montserrat font
 - **Icons**: Custom SVG t-shirt icon (avoiding emoji corruption)
-- **Layout**: Horizontal period columns with proportional block heights
+- **Layout**: Responsive horizontal period columns with fixed separator lines
 - **Interactions**: Form-based transaction entry with real-time updates
 
+### Visual Design System
+- **Individual Transaction Blocks**: Each database transaction renders as separate visual block
+- **Fixed Separator Line**: Consistent middle line across all periods using absolute positioning
+- **Custom Color Palette**:
+  - Dark Green (#006633): Revenue blocks and positive amounts
+  - Light Green (#ccffcc): Unrealized gains blocks
+  - Custom Red (#cc3333): Expense blocks and negative amounts
+- **Typography**: Montserrat font family with bold weights throughout
+- **Responsive Containers**: 400px desktop, 300px tablet, 240px mobile with dynamic scaling
+
+### Block Positioning System
+- **Revenue Section**: Grows upward from separator line with `flex-direction: column-reverse`
+- **Expense Section**: Grows downward from separator line with `flex-direction: column`
+- **Unrealized Gains**: Positioned at top of revenue section (last in green block list)
+- **Dynamic Scaling**: Proportional height adjustment when content exceeds container limits
+
 ## Key Features
-✅ **Period-based financial modeling** with running totals  
-✅ **Visual block representation** with proportional heights  
-✅ **Inventory tracking** across periods  
-✅ **Unrealized gains visualization** for business planning  
-✅ **Real-time calculations** with SQLite persistence  
-✅ **Responsive design** with Tailwind CSS  
-✅ **SVG icons** for clean t-shirt indicators  
+✅ **Individual transaction blocks** replacing aggregated summaries  
+✅ **Intelligent block placement** preventing overlaps with chronological stacking  
+✅ **Fixed separator line positioning** consistent across all periods  
+✅ **Responsive design** with mobile-first approach and smooth scrolling  
+✅ **Dynamic height scaling** maintaining proportions while ensuring readability  
+✅ **Period-based financial modeling** with running totals and inventory tracking  
+✅ **Unrealized gains visualization** for business planning and scenario modeling  
+✅ **Real-time calculations** with SQLite persistence and transaction-level APIs  
+✅ **Professional visual design** with custom color palette and Montserrat typography  
+✅ **Sample data system** for easy testing and demonstration  
+✅ **Debug mode** with styled transaction details for development visibility  
 
 ## Development Commands
 - `npm run dev` - Start local development server
