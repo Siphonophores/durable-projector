@@ -10,7 +10,7 @@
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"MyDurableObject"
+				"FinancialProjector"
 			],
 			"tag": "v1"
 		}
@@ -18,7 +18,7 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "MyDurableObject",
+				"class_name": "FinancialProjector",
 				"name": "MY_DURABLE_OBJECT"
 			}
 		]

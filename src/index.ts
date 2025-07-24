@@ -1,66 +1,186 @@
 import { DurableObject } from "cloudflare:workers";
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
+interface Transaction {
+	id?: number;
+	period: number;
+	type: 'expense' | 'revenue';
+	amount: number;
+	inventory_change: number;
+	description: string;
+	created_at?: string;
+}
 
-/** A Durable Object's behavior is defined in an exported Javascript class */
-export class MyDurableObject extends DurableObject<Env> {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param ctx - The interface for interacting with Durable Object state
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 */
+interface PeriodSummary {
+	period: number;
+	starting_balance: number;
+	total_expenses: number;
+	total_revenue: number;
+	ending_balance: number;
+	starting_inventory: number;
+	inventory_produced: number;
+	inventory_sold: number;
+	ending_inventory: number;
+	unrealized_gains: number;
+}
+
+export class FinancialProjector extends DurableObject<Env> {
+	sql: SqlStorage;
+
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
+		this.sql = ctx.storage.sql;
+		
+		this.sql.exec(`
+			CREATE TABLE IF NOT EXISTS transactions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				period INTEGER NOT NULL,
+				type TEXT NOT NULL CHECK (type IN ('expense', 'revenue')),
+				amount REAL NOT NULL,
+				inventory_change INTEGER NOT NULL DEFAULT 0,
+				description TEXT NOT NULL,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			);
+			CREATE INDEX IF NOT EXISTS idx_transactions_period ON transactions(period);
+		`);
 	}
 
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @param name - The name provided to a Durable Object instance from a Worker
-	 * @returns The greeting to be sent back to the Worker
-	 */
-	async sayHello(name: string): Promise<string> {
-		return `Hello, ${name}!`;
+	addTransaction(transaction: Omit<Transaction, 'id' | 'created_at'>): Transaction {
+		const cursor = this.sql.exec(`
+			INSERT INTO transactions (period, type, amount, inventory_change, description)
+			VALUES (?, ?, ?, ?, ?)
+			RETURNING *
+		`, 
+			transaction.period,
+			transaction.type,
+			transaction.amount,
+			transaction.inventory_change,
+			transaction.description
+		);
+
+		return cursor.one() as Transaction;
+	}
+
+	getPeriodSummary(period: number): PeriodSummary {
+		const cursor = this.sql.exec(`
+			SELECT * FROM transactions WHERE period <= ? ORDER BY period, id
+		`, period);
+		
+		const transactions = cursor.toArray() as Transaction[];
+
+		let runningBalance = 0;
+		let runningInventory = 0;
+		let periodExpenses = 0;
+		let periodRevenue = 0;
+		let periodInventoryProduced = 0;
+		let periodInventorySold = 0;
+
+		// Calculate starting balances by processing all transactions before this period
+		for (const tx of transactions) {
+			if (tx.period < period) {
+				runningBalance += tx.type === 'revenue' ? tx.amount : -tx.amount;
+				runningInventory += tx.inventory_change;
+			}
+		}
+
+		const startingBalance = runningBalance;
+		const startingInventory = runningInventory;
+
+		// Now process this period's transactions
+		for (const tx of transactions) {
+			if (tx.period === period) {
+				if (tx.type === 'expense') {
+					periodExpenses += tx.amount;
+					if (tx.inventory_change > 0) periodInventoryProduced += tx.inventory_change;
+				} else {
+					periodRevenue += tx.amount;
+					if (tx.inventory_change < 0) periodInventorySold += Math.abs(tx.inventory_change);
+				}
+				runningBalance += tx.type === 'revenue' ? tx.amount : -tx.amount;
+				runningInventory += tx.inventory_change;
+			}
+		}
+
+		const endingInventory = Math.max(0, runningInventory);
+		const unrealizedGains = endingInventory * 400; // Assuming 400 MXN sale price per shirt
+
+		return {
+			period,
+			starting_balance: period === 1 ? 0 : startingBalance,
+			total_expenses: periodExpenses,
+			total_revenue: periodRevenue,
+			ending_balance: runningBalance,
+			starting_inventory: period === 1 ? 0 : startingInventory,
+			inventory_produced: periodInventoryProduced,
+			inventory_sold: periodInventorySold,
+			ending_inventory: endingInventory,
+			unrealized_gains: unrealizedGains
+		};
+	}
+
+	getAllPeriods(): PeriodSummary[] {
+		const cursor = this.sql.exec(`SELECT MAX(period) as max_period FROM transactions`);
+		const result = cursor.toArray()[0] as { max_period: number | null };
+		
+		const maxPeriod = result?.max_period || 1;
+		const periods: PeriodSummary[] = [];
+
+		for (let i = 1; i <= maxPeriod; i++) {
+			periods.push(this.getPeriodSummary(i));
+		}
+
+		return periods;
 	}
 }
 
 export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param request - The request submitted to the Worker from the client
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 * @param ctx - The execution context of the Worker
-	 * @returns The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx): Promise<Response> {
-		// Create a `DurableObjectId` for an instance of the `MyDurableObject`
-		// class named "foo". Requests from all Workers to the instance named
-		// "foo" will go to a single globally unique Durable Object instance.
-		const id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName("foo");
-
-		// Create a stub to open a communication channel with the Durable
-		// Object instance.
+	async fetch(request, env, _ctx): Promise<Response> {
+		const url = new URL(request.url);
+		const id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName("projector");
 		const stub = env.MY_DURABLE_OBJECT.get(id);
 
-		// Call the `sayHello()` RPC method on the stub to invoke the method on
-		// the remote Durable Object instance
-		const greeting = await stub.sayHello("world");
+		if (url.pathname === '/api/transaction' && request.method === 'POST') {
+			const transaction = await request.json<Omit<Transaction, 'id' | 'created_at'>>();
+			const result = await stub.addTransaction(transaction);
+			return Response.json(result);
+		}
 
-		return new Response(greeting);
+		if (url.pathname === '/api/periods') {
+			const periods = await stub.getAllPeriods();
+			return Response.json(periods);
+		}
+
+		if (url.pathname.startsWith('/api/period/')) {
+			const period = parseInt(url.pathname.split('/')[3]);
+			if (isNaN(period)) {
+				return new Response('Invalid period', { status: 400 });
+			}
+			const summary = await stub.getPeriodSummary(period);
+			return Response.json(summary);
+		}
+
+		// Serve basic HTML for now
+		return new Response(`
+			<!DOCTYPE html>
+			<html>
+			<head>
+				<title>T-Shirt Financial Projector</title>
+				<script src="https://cdn.tailwindcss.com"></script>
+			</head>
+			<body class="bg-gray-100 p-8">
+				<h1 class="text-2xl font-bold mb-4">T-Shirt Financial Projector</h1>
+				<p class="mb-4">Durable Object is running!</p>
+				<div class="space-y-2">
+					<p><strong>API Endpoints:</strong></p>
+					<ul class="list-disc list-inside space-y-1">
+						<li>POST /api/transaction - Add a transaction</li>
+						<li>GET /api/periods - Get all period summaries</li>
+						<li>GET /api/period/[number] - Get specific period summary</li>
+					</ul>
+				</div>
+			</body>
+			</html>
+		`, {
+			headers: { 'Content-Type': 'text/html' }
+		});
 	},
 } satisfies ExportedHandler<Env>;
