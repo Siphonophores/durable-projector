@@ -101,7 +101,7 @@ export class FinancialProjector extends DurableObject<Env> {
 		}
 
 		const endingInventory = Math.max(0, runningInventory);
-		const unrealizedGains = endingInventory * 400; // Assuming 400 MXN sale price per shirt
+		const unrealizedGains = endingInventory * 500; // 500 MXN sale price per shirt
 
 		return {
 			period,
@@ -115,6 +115,112 @@ export class FinancialProjector extends DurableObject<Env> {
 			ending_inventory: endingInventory,
 			unrealized_gains: unrealizedGains
 		};
+	}
+
+	getTransactionsByPeriod(period: number): Transaction[] {
+		const cursor = this.sql.exec(`
+			SELECT * FROM transactions WHERE period = ? ORDER BY id ASC
+		`, period);
+		
+		return cursor.toArray() as Transaction[];
+	}
+
+	getAllPeriodsWithTransactions(): Array<PeriodSummary & { transactions: Transaction[] }> {
+		const cursor = this.sql.exec(`SELECT MAX(period) as max_period FROM transactions`);
+		const result = cursor.toArray()[0] as { max_period: number | null };
+		
+		const maxPeriod = result?.max_period || 1;
+		const periods: Array<PeriodSummary & { transactions: Transaction[] }> = [];
+
+		for (let i = 1; i <= maxPeriod; i++) {
+			const summary = this.getPeriodSummary(i);
+			const transactions = this.getTransactionsByPeriod(i);
+			periods.push({ ...summary, transactions });
+		}
+
+		return periods;
+	}
+
+	addSampleData(): string {
+		// Clear existing data
+		this.sql.exec(`DELETE FROM transactions`);
+		
+		// Period 1: Multiple transactions
+		this.addTransaction({
+			period: 1,
+			type: 'expense',
+			amount: 1000,
+			inventory_change: 5,
+			description: 'Manufacturing 5 shirts'
+		});
+		
+		this.addTransaction({
+			period: 1,
+			type: 'revenue',
+			amount: 500,
+			inventory_change: -1,
+			description: 'Sold 1 shirt online'
+		});
+		
+		this.addTransaction({
+			period: 1,
+			type: 'revenue',
+			amount: 500,
+			inventory_change: -1,
+			description: 'Sold 1 shirt at market'
+		});
+		
+		this.addTransaction({
+			period: 1,
+			type: 'expense',
+			amount: 240,
+			inventory_change: 0,
+			description: 'Shipping costs'
+		});
+
+		// Period 2: More complex
+		this.addTransaction({
+			period: 2,
+			type: 'expense',
+			amount: 1000,
+			inventory_change: 5,
+			description: 'Manufacturing batch 2'
+		});
+		
+		this.addTransaction({
+			period: 2,
+			type: 'revenue',
+			amount: 1000,
+			inventory_change: -2,
+			description: 'Wholesale order 2 shirts'
+		});
+		
+		this.addTransaction({
+			period: 2,
+			type: 'revenue',
+			amount: 1500,
+			inventory_change: -3,
+			description: 'Premium order 3 shirts'
+		});
+		
+		this.addTransaction({
+			period: 2,
+			type: 'expense',
+			amount: 120,
+			inventory_change: 0,
+			description: 'Packaging materials'
+		});
+
+		// Period 3: Simple
+		this.addTransaction({
+			period: 3,
+			type: 'expense',
+			amount: 240,
+			inventory_change: 0,
+			description: 'Marketing expenses'
+		});
+		
+		return 'Sample data added successfully';
 	}
 
 	getAllPeriods(): PeriodSummary[] {
@@ -138,70 +244,149 @@ function getTshirtIcon(size: string = "16"): string {
 	</svg>`;
 }
 
-function generatePeriodColumns(periods: PeriodSummary[]): string {
+function generateTransactionBlock(transaction: Transaction, scaleFactor: number): string {
+	const height = Math.max(40 * scaleFactor, transaction.amount * 0.05 * scaleFactor);
+	const isRevenue = transaction.type === 'revenue';
+	const bgColor = isRevenue ? 'bg-dark-green' : 'bg-custom-red';
+	
+	return `
+		<div class="${bgColor} text-white p-2 rounded mb-1 relative flex flex-col justify-center items-center" 
+			style="height: ${height}px">
+			<div class="text-sm">${isRevenue ? '+' : ''}${transaction.amount.toLocaleString()}</div>
+			<div class="text-xs opacity-75">${transaction.description}</div>
+			${transaction.inventory_change !== 0 ? `
+				<div class="absolute top-1 left-1 text-xs flex items-center">
+					${transaction.inventory_change > 0 ? '+' : ''}${transaction.inventory_change}${getTshirtIcon("12")}
+				</div>
+			` : ''}
+		</div>
+	`;
+}
+
+function generateUnrealizedGainsBlock(period: PeriodSummary, scaleFactor: number): string {
+	if (period.unrealized_gains <= 0) return '';
+	
+	const height = Math.max(30 * scaleFactor, period.unrealized_gains * 0.05 * scaleFactor);
+	
+	return `
+		<div class="bg-light-green text-gray-800 p-2 rounded relative opacity-80 mb-1 flex flex-col justify-center items-center" 
+			style="height: ${height}px">
+			<div class="text-sm">${period.unrealized_gains.toLocaleString()}</div>
+			<div class="absolute top-1 left-1 text-xs flex items-center">${period.ending_inventory}${getTshirtIcon("12")}</div>
+		</div>
+	`;
+}
+
+function calculateOptimalScaling(periods: Array<PeriodSummary & { transactions: Transaction[] }>): { scaleFactor: number } {
+	if (periods.length === 0) return { scaleFactor: 1 };
+	
+	// Calculate maximum content height for each period based on individual transactions
+	const maxContentHeights = periods.map(period => {
+		const revenueTransactions = period.transactions.filter(t => t.type === 'revenue');
+		const expenseTransactions = period.transactions.filter(t => t.type === 'expense');
+		
+		const revenueHeight = revenueTransactions.reduce((sum, t) => 
+			sum + Math.max(40, t.amount * 0.05) + 4, 0); // +4 for margin
+		const expenseHeight = expenseTransactions.reduce((sum, t) => 
+			sum + Math.max(40, t.amount * 0.05) + 4, 0); // +4 for margin
+		const unrealizedHeight = Math.max(30, period.unrealized_gains * 0.05);
+		
+		// Revenue section is max of individual revenue blocks or unrealized gains
+		const revenueSection = Math.max(revenueHeight, unrealizedHeight);
+		const totalHeight = revenueSection + expenseHeight;
+		
+		return totalHeight;
+	});
+	
+	const maxContent = Math.max(...maxContentHeights);
+	
+	// Use 80% of container height as usable space (leaving room for padding)
+	// Base heights: 400px desktop, 300px tablet, 240px mobile
+	const usableHeight = 320; // 80% of 400px desktop - we'll scale down for smaller screens via CSS
+	
+	if (maxContent > usableHeight) {
+		return { scaleFactor: usableHeight / maxContent };
+	}
+	
+	return { scaleFactor: 1 };
+}
+
+function generatePeriodColumns(periods: Array<PeriodSummary & { transactions: Transaction[] }>): string {
 	if (periods.length === 0) {
 		return `
-			<div class="flex-shrink-0 bg-white rounded-lg shadow p-4 w-64">
+			<div class="flex-shrink-0 bg-white rounded-lg shadow p-4 w-64 period-column">
 				<h3 class="text-lg font-semibold mb-4 text-center">Period 1</h3>
-				<div class="text-center text-gray-500">No transactions yet</div>
+				<div class="period-container">
+					<div class="separator-line"></div>
+					<div class="text-center text-gray-500 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">No transactions yet</div>
+				</div>
 			</div>
 		`;
 	}
 
+	const { scaleFactor } = calculateOptimalScaling(periods);
+
 	return periods.map(period => `
-		<div class="flex-shrink-0 bg-white rounded-lg shadow p-4 w-64">
+		<div class="flex-shrink-0 bg-white rounded-lg shadow p-4 w-64 period-column">
 			<h3 class="text-lg font-semibold mb-4 text-center">Period ${period.period}</h3>
 			
 			<!-- Financial totals at top -->
 			<div class="mb-4 text-center">
-				${period.starting_balance !== 0 ? `<div class="text-sm text-gray-500">+${period.starting_balance.toLocaleString()}</div>` : ''}
-				${period.total_revenue > 0 ? `<div class="text-green-600 font-medium">+${period.total_revenue.toLocaleString()}</div>` : ''}
-				${period.total_expenses > 0 ? `<div class="text-red-600 font-medium">-${period.total_expenses.toLocaleString()}</div>` : ''}
-				<div class="text-lg font-bold border-t pt-1 mt-1">${period.ending_balance.toLocaleString()}</div>
+				${period.starting_balance !== 0 ? `<div class="text-sm text-gray-500">${period.starting_balance > 0 ? '+' : ''}${period.starting_balance.toLocaleString()}</div>` : ''}
+				${period.total_revenue > 0 ? `<div class="text-dark-green">+${period.total_revenue.toLocaleString()}</div>` : ''}
+				${period.total_expenses > 0 ? `<div class="text-custom-red">-${period.total_expenses.toLocaleString()}</div>` : ''}
+				<div class="text-lg border-t pt-1 mt-1">${period.ending_balance > 0 ? '+' : ''}${period.ending_balance.toLocaleString()}</div>
 			</div>
 
-			<!-- Visual blocks container -->
-			<div class="relative min-h-64 flex flex-col justify-end">
-				<!-- Revenue blocks (green) -->
-				${period.total_revenue > 0 ? `
-					<div class="bg-green-500 text-white p-2 rounded mb-1 relative" 
-						style="height: ${Math.max(40, period.total_revenue * 0.05)}px">
-						<div class="text-xs">Revenue</div>
-						<div class="text-sm font-bold">${period.total_revenue.toLocaleString()}</div>
-						${period.inventory_sold > 0 ? `<div class="absolute top-1 left-1 text-xs flex items-center">-${period.inventory_sold}${getTshirtIcon("12")}</div>` : ''}
-					</div>
-				` : ''}
+			<!-- Visual blocks container with fixed separator -->
+			<div class="period-container">
+				<!-- Fixed separator line -->
+				<div class="separator-line"></div>
+				
+				<!-- Revenue section (grows upward from line) -->
+				<div class="revenue-section">
+					<!-- Individual revenue transactions closest to middle line -->
+					${period.transactions
+						.filter(t => t.type === 'revenue')
+						.map(transaction => generateTransactionBlock(transaction, scaleFactor))
+						.join('')}
+					
+					<!-- Unrealized gains at the top (last element in the list) -->
+					${generateUnrealizedGainsBlock(period, scaleFactor)}
+				</div>
 
-				<!-- Dark separator line -->
-				<div class="border-b-2 border-gray-800 my-2"></div>
-
-				<!-- Expense blocks (red) -->
-				${period.total_expenses > 0 ? `
-					<div class="bg-red-500 text-white p-2 rounded mb-1 relative" 
-						style="height: ${Math.max(40, period.total_expenses * 0.05)}px">
-						<div class="text-xs">Expenses</div>
-						<div class="text-sm font-bold">${period.total_expenses.toLocaleString()}</div>
-						${period.inventory_produced > 0 ? `<div class="absolute top-1 left-1 text-xs flex items-center">+${period.inventory_produced}${getTshirtIcon("12")}</div>` : ''}
-					</div>
-				` : ''}
-
-				<!-- Unrealized gains (light green) -->
-				${period.unrealized_gains > 0 ? `
-					<div class="bg-green-300 text-gray-800 p-2 rounded relative" 
-						style="height: ${Math.max(30, period.unrealized_gains * 0.05)}px">
-						<div class="text-xs">Unrealized</div>
-						<div class="text-sm font-bold">${period.unrealized_gains.toLocaleString()}</div>
-						<div class="absolute top-1 left-1 text-xs flex items-center">${period.ending_inventory}${getTshirtIcon("12")}</div>
-					</div>
-				` : ''}
+				<!-- Expense section (grows downward from line) -->
+				<div class="expense-section">
+					${period.transactions
+						.filter(t => t.type === 'expense')
+						.map(transaction => generateTransactionBlock(transaction, scaleFactor))
+						.join('')}
+				</div>
 			</div>
 
 			<!-- Inventory summary at bottom -->
 			<div class="mt-4 pt-2 border-t text-center">
 				${period.starting_inventory > 0 ? `<span class="text-gray-500 text-sm inline-flex items-center">${period.starting_inventory}${getTshirtIcon("16")}</span> ` : ''}
-				${period.inventory_produced > 0 ? `<span class="text-red-600 text-sm inline-flex items-center">+${period.inventory_produced}${getTshirtIcon("16")}</span> ` : ''}
-				${period.inventory_sold > 0 ? `<span class="text-green-600 text-sm inline-flex items-center">-${period.inventory_sold}${getTshirtIcon("16")}</span> ` : ''}
-				<div class="font-bold inline-flex items-center justify-center">${period.ending_inventory}${getTshirtIcon("20")}</div>
+				${period.inventory_produced > 0 ? `<span class="text-custom-red text-sm inline-flex items-center">+${period.inventory_produced}${getTshirtIcon("16")}</span> ` : ''}
+				${period.inventory_sold > 0 ? `<span class="text-dark-green text-sm inline-flex items-center">-${period.inventory_sold}${getTshirtIcon("16")}</span> ` : ''}
+				<div class="inline-flex items-center justify-center">${period.ending_inventory}${getTshirtIcon("20")}</div>
+			</div>
+
+			<!-- Debug: Raw transaction data -->
+			<div class="mt-4 pt-2 border-t text-xs text-gray-600">
+				<div class="font-semibold mb-2">Transactions (${period.transactions.length}):</div>
+				<div class="space-y-1">
+					${period.transactions.map(t => {
+						const isRevenue = t.type === 'revenue';
+						const borderColor = isRevenue ? 'border-dark-green' : 'border-custom-red';
+						const textColor = isRevenue ? 'text-dark-green' : 'text-custom-red';
+						return `
+							<div class="${textColor} ${borderColor} border px-2 py-1 rounded-sm text-xs">
+								${isRevenue ? '+' : ''}$${t.amount} ${t.inventory_change !== 0 ? `(${t.inventory_change > 0 ? '+' : ''}${t.inventory_change} shirts)` : ''} - ${t.description}
+							</div>
+						`;
+					}).join('')}
+				</div>
 			</div>
 		</div>
 	`).join('');
@@ -244,6 +429,23 @@ function generateJavaScript(): string {
 			}
 		}
 
+		async function loadSampleData() {
+			try {
+				const response = await fetch('/api/sample-data', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' }
+				});
+
+				if (response.ok) {
+					window.location.reload();
+				} else {
+					alert('Error loading sample data');
+				}
+			} catch (error) {
+				alert('Error: ' + error.message);
+			}
+		}
+
 		// Auto-update inventory change based on type
 		document.getElementById('type').addEventListener('change', function() {
 			const inventoryField = document.getElementById('inventory_change');
@@ -271,6 +473,16 @@ export default {
 		if (url.pathname === '/api/periods') {
 			const periods = await stub.getAllPeriods();
 			return Response.json(periods);
+		}
+
+		if (url.pathname === '/api/periods-with-transactions') {
+			const periods = await stub.getAllPeriodsWithTransactions();
+			return Response.json(periods);
+		}
+
+		if (url.pathname === '/api/sample-data' && request.method === 'POST') {
+			const result = await stub.addSampleData();
+			return Response.json({ message: result });
 		}
 
 		if (url.pathname.startsWith('/api/period/')) {
@@ -301,7 +513,7 @@ export default {
 		}
 
 		// Serve the financial projector interface
-		const periods = await stub.getAllPeriods();
+		const periods = await stub.getAllPeriodsWithTransactions();
 		
 		return new Response(`
 			<!DOCTYPE html>
@@ -309,10 +521,103 @@ export default {
 			<head>
 				<title>T-Shirt Financial Projector</title>
 				<script src="https://cdn.tailwindcss.com"></script>
+				<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 				<meta name="viewport" content="width=device-width, initial-scale=1.0">
 				<style>
-					.block-height { height: calc(var(--amount) * 0.1px); min-height: 40px; }
-					.shirt-icon::before { content: '👕'; }
+					* {
+						font-family: 'Montserrat', sans-serif;
+						font-weight: bold;
+					}
+					
+					.bg-dark-green {
+						background-color: #006633;
+					}
+					
+					.bg-light-green {
+						background-color: #ccffcc;
+					}
+					
+					.bg-custom-red {
+						background-color: #cc3333;
+					}
+					
+					.text-dark-green {
+						color: #006633;
+					}
+					
+					.text-custom-red {
+						color: #cc3333;
+					}
+					
+					.border-dark-green {
+						border-color: #006633;
+					}
+					
+					.border-custom-red {
+						border-color: #cc3333;
+					}
+					
+					.period-container {
+						height: 400px;
+						position: relative;
+					}
+					
+					.separator-line {
+						position: absolute;
+						top: 50%;
+						left: 0;
+						right: 0;
+						height: 2px;
+						background-color: #1f2937;
+						z-index: 10;
+					}
+					
+					.revenue-section {
+						position: absolute;
+						bottom: 50%;
+						left: 0;
+						right: 0;
+						display: flex;
+						flex-direction: column-reverse;
+						padding-bottom: 8px;
+					}
+					
+					.expense-section {
+						position: absolute;
+						top: 50%;
+						left: 0;
+						right: 0;
+						display: flex;
+						flex-direction: column;
+						padding-top: 8px;
+					}
+					
+					
+					@media (min-width: 1024px) {
+						.period-container { height: 400px; }
+					}
+					
+					@media (min-width: 768px) and (max-width: 1023px) {
+						.period-container { height: 300px; }
+					}
+					
+					@media (max-width: 767px) {
+						.period-container { height: 240px; }
+						.periods-wrapper {
+							flex-direction: column !important;
+							overflow-y: auto;
+							max-height: 80vh;
+						}
+					}
+					
+					.periods-wrapper {
+						scroll-behavior: smooth;
+						scroll-snap-type: x mandatory;
+					}
+					
+					.period-column {
+						scroll-snap-align: start;
+					}
 				</style>
 			</head>
 			<body class="bg-gray-50 p-6">
@@ -320,7 +625,7 @@ export default {
 					<h1 class="text-3xl font-bold text-gray-800 mb-8">T-Shirt Financial Projector</h1>
 					
 					<!-- Period columns container -->
-					<div class="flex gap-6 overflow-x-auto pb-6">
+					<div class="flex gap-6 overflow-x-auto pb-6 periods-wrapper">
 						${generatePeriodColumns(periods)}
 					</div>
 					
@@ -356,10 +661,16 @@ export default {
 									class="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
 							</div>
 						</form>
-						<button onclick="addTransaction()" 
-							class="mt-4 bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 transition-colors">
-							Add Transaction
-						</button>
+						<div class="mt-4 flex gap-3">
+							<button onclick="addTransaction()" 
+								class="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 transition-colors">
+								Add Transaction
+							</button>
+							<button onclick="loadSampleData()" 
+								class="bg-green-600 text-white px-6 py-2 rounded-md hover:bg-green-700 transition-colors">
+								Load Sample Data
+							</button>
+						</div>
 					</div>
 				</div>
 				
