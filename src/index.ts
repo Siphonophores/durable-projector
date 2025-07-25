@@ -44,7 +44,7 @@ export class FinancialProjector extends DurableObject<Env> {
 		`);
 	}
 
-	addTransaction(transaction: Omit<Transaction, 'id' | 'created_at'>): Transaction {
+	private addTransactionInternal(transaction: Omit<Transaction, 'id' | 'created_at'>): Transaction {
 		const cursor = this.sql.exec(`
 			INSERT INTO transactions (period, type, amount, inventory_change, description)
 			VALUES (?, ?, ?, ?, ?)
@@ -58,6 +58,65 @@ export class FinancialProjector extends DurableObject<Env> {
 		);
 
 		return cursor.one() as Transaction;
+	}
+
+	private getCurrentInventory(period: number): number {
+		const cursor = this.sql.exec(`
+			SELECT SUM(inventory_change) as total_inventory 
+			FROM transactions 
+			WHERE period <= ?
+		`, period);
+		
+		const result = cursor.one() as { total_inventory: number | null };
+		return result?.total_inventory || 0;
+	}
+
+	addTransaction(transaction: Omit<Transaction, 'id' | 'created_at'>): Transaction[] {
+		const addedTransactions: Transaction[] = [];
+
+		// If this is a revenue transaction (sale), check inventory and add auto-transactions
+		if (transaction.type === 'revenue' && transaction.inventory_change < 0) {
+			const shirtsToSell = Math.abs(transaction.inventory_change);
+			const currentInventory = this.getCurrentInventory(transaction.period - 1); // Inventory before this period
+			
+			// Check if we need to auto-purchase shirts to cover shortage
+			if (currentInventory < shirtsToSell) {
+				const shortage = shirtsToSell - currentInventory;
+				const manufacturingCost = shortage * 200; // 200 MXN per shirt
+				
+				// Add manufacturing transaction for exact shortage
+				const manufacturingTx = this.addTransactionInternal({
+					period: transaction.period,
+					type: 'expense',
+					amount: manufacturingCost,
+					inventory_change: shortage,
+					description: `Auto-purchase ${shortage} shirts for sale`
+				});
+				addedTransactions.push(manufacturingTx);
+			}
+
+			// Add the original sales transaction
+			const salesTx = this.addTransactionInternal(transaction);
+			addedTransactions.push(salesTx);
+
+			// Auto-add shipping costs (120 MXN per shirt sold)
+			const shippingCost = shirtsToSell * 120;
+			const shippingTx = this.addTransactionInternal({
+				period: transaction.period,
+				type: 'expense',
+				amount: shippingCost,
+				inventory_change: 0,
+				description: `Shipping for ${shirtsToSell} shirts`
+			});
+			addedTransactions.push(shippingTx);
+
+		} else {
+			// For non-sales transactions (expenses or manual revenue), just add as-is
+			const tx = this.addTransactionInternal(transaction);
+			addedTransactions.push(tx);
+		}
+
+		return addedTransactions;
 	}
 
 	getPeriodSummary(period: number): PeriodSummary {
@@ -145,7 +204,7 @@ export class FinancialProjector extends DurableObject<Env> {
 		// Clear existing data
 		this.sql.exec(`DELETE FROM transactions`);
 		
-		// Period 1: Multiple transactions
+		// Period 1: Start with some manufacturing, then sales (will auto-add shipping)
 		this.addTransaction({
 			period: 1,
 			type: 'expense',
@@ -154,6 +213,7 @@ export class FinancialProjector extends DurableObject<Env> {
 			description: 'Manufacturing 5 shirts'
 		});
 		
+		// This will auto-add shipping costs (120 MXN per shirt)
 		this.addTransaction({
 			period: 1,
 			type: 'revenue',
@@ -162,6 +222,7 @@ export class FinancialProjector extends DurableObject<Env> {
 			description: 'Sold 1 shirt online'
 		});
 		
+		// This will also auto-add shipping costs
 		this.addTransaction({
 			period: 1,
 			type: 'revenue',
@@ -169,16 +230,18 @@ export class FinancialProjector extends DurableObject<Env> {
 			inventory_change: -1,
 			description: 'Sold 1 shirt at market'
 		});
-		
-		this.addTransaction({
-			period: 1,
-			type: 'expense',
-			amount: 240,
-			inventory_change: 0,
-			description: 'Shipping costs'
-		});
 
-		// Period 2: More complex
+		// Period 2: Test auto-purchase logic - selling more than we have
+		// We should have 3 shirts left from period 1, trying to sell 4 will auto-purchase 1 shirt
+		this.addTransaction({
+			period: 2,
+			type: 'revenue',
+			amount: 2000,
+			inventory_change: -4,
+			description: 'Bulk order - 4 shirts'
+		});
+		
+		// Add some manual manufacturing to build up inventory
 		this.addTransaction({
 			period: 2,
 			type: 'expense',
@@ -187,22 +250,7 @@ export class FinancialProjector extends DurableObject<Env> {
 			description: 'Manufacturing batch 2'
 		});
 		
-		this.addTransaction({
-			period: 2,
-			type: 'revenue',
-			amount: 1000,
-			inventory_change: -2,
-			description: 'Wholesale order 2 shirts'
-		});
-		
-		this.addTransaction({
-			period: 2,
-			type: 'revenue',
-			amount: 1500,
-			inventory_change: -3,
-			description: 'Premium order 3 shirts'
-		});
-		
+		// Add some manual expenses
 		this.addTransaction({
 			period: 2,
 			type: 'expense',
@@ -211,16 +259,17 @@ export class FinancialProjector extends DurableObject<Env> {
 			description: 'Packaging materials'
 		});
 
-		// Period 3: Simple
+		// Period 3: Test extreme shortage - selling way more than we have
+		// Should auto-purchase exactly what we need
 		this.addTransaction({
 			period: 3,
-			type: 'expense',
-			amount: 240,
-			inventory_change: 0,
-			description: 'Marketing expenses'
+			type: 'revenue',
+			amount: 3500,
+			inventory_change: -7,
+			description: 'Large wholesale order - 7 shirts'
 		});
 		
-		return 'Sample data added successfully';
+		return 'Sample data added successfully with auto-purchase and auto-shipping';
 	}
 
 	getAllPeriods(): PeriodSummary[] {
@@ -513,8 +562,8 @@ export default {
 
 		if (url.pathname === '/api/transaction' && request.method === 'POST') {
 			const transaction = await request.json<Omit<Transaction, 'id' | 'created_at'>>();
-			const result = await stub.addTransaction(transaction);
-			return Response.json(result);
+			const results = await stub.addTransaction(transaction);
+			return Response.json(results);
 		}
 
 		if (url.pathname === '/api/periods') {

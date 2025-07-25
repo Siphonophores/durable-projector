@@ -139,6 +139,55 @@ CREATE TABLE transactions (
 ✅ **Sample data system** for easy testing and demonstration  
 ✅ **Debug mode** with styled transaction details for development visibility  
 
+## Enhanced Sales Logic (Auto-Purchase & Auto-Shipping)
+
+### Auto-Purchase for Inventory Shortages
+When a sales transaction attempts to sell more shirts than available inventory:
+- **Calculates exact shortage**: `shirts_to_sell - current_inventory`
+- **Auto-adds manufacturing transaction**: `shortage × 200 MXN per shirt`
+- **Maintains zero final inventory**: Purchases exactly what's needed, no surplus from auto-purchase
+- **Example**: Have 3 shirts, sell 5 → Auto-add 400 MXN manufacturing (+2 shirts) → Final inventory: 0
+
+### Auto-Shipping Costs
+For every sales transaction with inventory changes:
+- **Cost calculation**: `shirts_sold × 120 MXN per shirt`
+- **Automatically added**: No manual shipping entry required
+- **Example**: Sell 3 shirts → Auto-add 360 MXN shipping expense
+
+### Implementation Details
+- **Method**: Enhanced `addTransaction()` returns `Transaction[]` instead of single `Transaction`
+- **Logic flow**: Check inventory → Auto-purchase if needed → Add sale → Auto-add shipping
+- **Inventory tracking**: Uses `getCurrentInventory(period - 1)` to check availability before sales
+
+## Cloudflare Durable Objects Migration Insights
+
+### SQLite Storage Migration Issues
+Based on Cloudflare documentation and deployment experience:
+
+1. **Cannot migrate existing classes to SQLite**: You cannot enable SQLite storage backend on an already deployed Durable Object class
+2. **Migration tag synchronization**: Production may have migration tags that aren't in your local wrangler config, causing "migration tag not found" warnings
+3. **Simple solution for new projects**: Add empty migration entries to match expected tags
+
+### Migration Best Practices
+- **For new projects**: Keep same class names, add sequential migration tags as needed
+- **For existing production**: Create new class names with `new_sqlite_classes` migration
+- **Tag management**: Ensure migration tags are sequential and match between local and production environments
+
+### Deployment Fix Applied
+```json
+"migrations": [
+    {
+        "new_sqlite_classes": ["FinancialProjector"],
+        "tag": "v1"
+    },
+    {
+        "tag": "v2"  // Empty migration to resolve tag mismatch
+    }
+]
+```
+
+This approach allows deploying enhanced logic to the same class without breaking existing Durable Objects.
+
 ## Development Commands
 - `npm run dev` - Start local development server
 - `npm run deploy` - Deploy to Cloudflare Workers
@@ -147,7 +196,9 @@ CREATE TABLE transactions (
 ## Learning Outcomes
 This project demonstrates:
 - Durable Objects with SQLite storage backend
+- Advanced transaction logic with auto-purchase and auto-shipping
 - Period-based financial calculations with running totals
 - Visual data representation with proportional scaling
 - Business logic separation (transactions vs. calculated UI elements)
 - Real-time web application with persistent state
+- Cloudflare Workers deployment and migration management
